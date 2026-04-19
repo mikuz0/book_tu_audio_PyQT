@@ -7,10 +7,14 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QProgressBar, QLabel, QMessageBox, QTabWidget, QTextEdit
+    QProgressBar, QLabel, QMessageBox, QTabWidget, QTextEdit,
+    QSlider
 )
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QBrush, QColor, QFont
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QBrush, QColor, QFont, QTextCursor
+from PyQt5.QtWidgets import QTextEdit as QTextEditWidget
+import pygame
+import subprocess
 from gui.task_manager import TaskManager
 from gui.queue_worker import QueueWorker
 
@@ -23,6 +27,14 @@ class ProcessTab(QWidget):
         self.task_manager = TaskManager()
         self.queue_worker = None
         self.selected_filename = None
+        
+        # 🎵 Состояние плеера
+        self.is_playing = False
+        self.current_audio_path = None
+        self.srt_segments = []
+        self.audio_duration_ms = 0
+        self.playback_timer = QTimer(self)
+        self.playback_timer.timeout.connect(self._update_playback_highlight)
         self.setup_ui()
 
     def setup_ui(self):
@@ -32,7 +44,6 @@ class ProcessTab(QWidget):
         queue_group = QGroupBox("Пакетная обработка")
         queue_layout = QVBoxLayout(queue_group)
 
-        # Кнопки управления
         controls_layout = QHBoxLayout()
         self.refresh_btn = QPushButton("🔄 Обновить список")
         self.refresh_btn.clicked.connect(self.parent.refresh_task_list)
@@ -53,7 +64,6 @@ class ProcessTab(QWidget):
         controls_layout.addStretch()
         queue_layout.addLayout(controls_layout)
 
-        # Кнопки запуска/остановки
         queue_controls_layout = QHBoxLayout()
         self.start_queue_btn = QPushButton("▶ Запуск")
         self.start_queue_btn.setStyleSheet("background-color: #4CAF50; font-weight: bold;")
@@ -74,7 +84,6 @@ class ProcessTab(QWidget):
         queue_controls_layout.addStretch()
         queue_layout.addLayout(queue_controls_layout)
 
-        # Таблица заданий
         self.tasks_table = QTableWidget()
         self.tasks_table.setColumnCount(5)
         self.tasks_table.setHorizontalHeaderLabels(["", "Статус", "Имя файла", "Аудио", "Ошибка"])
@@ -89,7 +98,6 @@ class ProcessTab(QWidget):
         self.tasks_table.itemChanged.connect(self.on_checkbox_changed)
         queue_layout.addWidget(self.tasks_table)
 
-        # Прогресс
         self.queue_progress = QProgressBar()
         self.queue_progress.setVisible(False)
         queue_layout.addWidget(self.queue_progress)
@@ -99,11 +107,11 @@ class ProcessTab(QWidget):
 
         layout.addWidget(queue_group)
 
-        # === Нижняя панель: просмотр промежуточных файлов ===
-        preview_group = QGroupBox("Просмотр промежуточных файлов (выбранный файл)")
+        # === Нижняя панель: просмотр (ТРИ ВКЛАДКИ) + плеер ===
+        preview_group = QGroupBox("Просмотр и воспроизведение")
         preview_layout = QVBoxLayout(preview_group)
 
-        # Выбранный файл
+        # Кнопки открытия папок
         selected_layout = QHBoxLayout()
         selected_layout.addWidget(QLabel("Файл:"))
         self.selected_file_label = QLabel("(не выбран)")
@@ -111,77 +119,113 @@ class ProcessTab(QWidget):
         selected_layout.addWidget(self.selected_file_label)
         selected_layout.addStretch()
 
-        # Кнопки открытия папок
-        self.open_extracted_btn = QPushButton("📄 Открыть извлечённый текст")
+        self.open_extracted_btn = QPushButton("📄 Открыть папку")
         self.open_extracted_btn.clicked.connect(self.open_extracted_folder)
         self.open_extracted_btn.setEnabled(False)
         selected_layout.addWidget(self.open_extracted_btn)
 
-        self.open_replaced_btn = QPushButton("✏ Открыть обработанный текст")
+        self.open_replaced_btn = QPushButton("✏ Открыть папку")
         self.open_replaced_btn.clicked.connect(self.open_replaced_folder)
         self.open_replaced_btn.setEnabled(False)
         selected_layout.addWidget(self.open_replaced_btn)
 
-        self.open_fragments_btn = QPushButton("📑 Открыть фрагменты")
+        self.open_fragments_btn = QPushButton("📑 Открыть папку")
         self.open_fragments_btn.clicked.connect(self.open_fragments_folder)
         self.open_fragments_btn.setEnabled(False)
         selected_layout.addWidget(self.open_fragments_btn)
 
-        self.open_audio_btn = QPushButton("🎵 Открыть аудио")
+        self.open_audio_btn = QPushButton("🎵 Открыть папку")
         self.open_audio_btn.clicked.connect(self.parent.open_audio_folder)
         self.open_audio_btn.setEnabled(False)
         selected_layout.addWidget(self.open_audio_btn)
 
         preview_layout.addLayout(selected_layout)
 
-        # Вкладки для просмотра содержимого
+        # === 🔹 ВОЗВРАТ К ТРЁМ ВКЛАДКАМ ===
         self.preview_tabs = QTabWidget()
+        self.preview_tabs.setMaximumHeight(300)
 
-        # Вкладка с извлечённым текстом
+        # Вкладка 1: Извлечённый текст
         self.extracted_text = QTextEdit()
         self.extracted_text.setReadOnly(True)
         self.extracted_text.setFont(QFont("Consolas", 10))
         self.preview_tabs.addTab(self.extracted_text, "Извлечённый текст")
 
-        # Вкладка с обработанным текстом
+        # Вкладка 2: Обработанный текст (ударения)
         self.replaced_text = QTextEdit()
         self.replaced_text.setReadOnly(True)
         self.replaced_text.setFont(QFont("Consolas", 10))
         self.preview_tabs.addTab(self.replaced_text, "Обработанный текст (ударения)")
 
-        # Вкладка со списком фрагментов
+        # Вкладка 3: Фрагменты
         self.fragments_list = QTextEdit()
         self.fragments_list.setReadOnly(True)
         self.fragments_list.setFont(QFont("Consolas", 9))
         self.preview_tabs.addTab(self.fragments_list, "Фрагменты")
 
         preview_layout.addWidget(self.preview_tabs)
+
+        # 🎵 Панель аудиоплеера (компактная, под вкладками)
+        player_group = QGroupBox("🎧 Аудиоплеер")
+        player_layout = QVBoxLayout(player_group)
+        player_layout.setContentsMargins(5, 5, 5, 5)
+        
+        controls_row = QHBoxLayout()
+        self.play_btn = QPushButton("▶ Играть")
+        self.play_btn.setEnabled(False)
+        self.play_btn.setFixedWidth(90)
+        self.play_btn.clicked.connect(self.toggle_playback)
+        controls_row.addWidget(self.play_btn)
+
+        self.stop_btn = QPushButton("⏹ Стоп")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setFixedWidth(70)
+        self.stop_btn.clicked.connect(self.stop_playback)
+        controls_row.addWidget(self.stop_btn)
+
+        self.seek_slider = QSlider(Qt.Horizontal)
+        self.seek_slider.setEnabled(False)
+        self.seek_slider.sliderPressed.connect(self._on_seek_pressed)
+        self.seek_slider.sliderReleased.connect(self._on_seek_released)
+        controls_row.addWidget(self.seek_slider)
+
+        self.time_label = QLabel("00:00 / 00:00")
+        self.time_label.setFixedWidth(100)
+        controls_row.addWidget(self.time_label)
+
+        vol_layout = QHBoxLayout()
+        vol_layout.addWidget(QLabel("🔊"))
+        self.volume_slider = QSlider(Qt.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(100)
+        self.volume_slider.valueChanged.connect(self._on_volume_changed)
+        vol_layout.addWidget(self.volume_slider)
+        controls_row.addLayout(vol_layout)
+
+        player_layout.addLayout(controls_row)
+        preview_layout.addWidget(player_group)
+
         layout.addWidget(preview_group)
 
     def update_tasks_table(self):
-        """Обновить таблицу заданий"""
         work_dir = self.parent.work_dir_edit.text()
         output_format = "mp3" if self.parent.mp3_radio.isChecked() else "wav"
         self.tasks_table.blockSignals(True)
         self.tasks_table.setRowCount(len(self.task_manager.tasks))
         for row, (filename, task) in enumerate(self.task_manager.tasks.items()):
-            # Чекбокс
             checkbox = QTableWidgetItem()
             checkbox.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
             checkbox.setCheckState(Qt.Checked if task.checked else Qt.Unchecked)
             checkbox.setData(Qt.UserRole, filename)
             self.tasks_table.setItem(row, 0, checkbox)
 
-            # Статус
             icon, text = self.task_manager.get_status_info(filename)
             status_item = QTableWidgetItem(f"{icon} {text}")
             self.tasks_table.setItem(row, 1, status_item)
 
-            # Имя файла
             name_item = QTableWidgetItem(filename)
             self.tasks_table.setItem(row, 2, name_item)
 
-            # Аудио
             if task.status == "completed":
                 duration = task.get_audio_duration(Path(work_dir), output_format)
                 audio_item = QTableWidgetItem(f"✅ {duration}" if duration else "✅ Да")
@@ -189,11 +233,9 @@ class ProcessTab(QWidget):
                 audio_item = QTableWidgetItem("❌ Нет")
             self.tasks_table.setItem(row, 3, audio_item)
 
-            # Ошибка
             error_item = QTableWidgetItem(task.error)
             self.tasks_table.setItem(row, 4, error_item)
 
-            # Цвет строки
             color = self._get_row_color(task.status)
             for col in range(5):
                 item = self.tasks_table.item(row, col)
@@ -202,7 +244,6 @@ class ProcessTab(QWidget):
         self.tasks_table.blockSignals(False)
 
     def _get_row_color(self, status: str) -> QColor:
-        """Получить цвет строки в зависимости от статуса"""
         if status == "completed":
             return QColor(200, 230, 200)
         elif status == "error":
@@ -212,7 +253,6 @@ class ProcessTab(QWidget):
         return QColor(255, 255, 255)
 
     def on_checkbox_changed(self, item):
-        """Обработка изменения чекбокса"""
         if item.column() == 0:
             filename = item.data(Qt.UserRole)
             if filename:
@@ -220,7 +260,6 @@ class ProcessTab(QWidget):
                 self.task_manager.update_check_state(filename, checked)
 
     def on_task_selected(self, item):
-        """Выбор файла в таблице"""
         row = item.row()
         filename_item = self.tasks_table.item(row, 2)
         if filename_item:
@@ -228,8 +267,8 @@ class ProcessTab(QWidget):
             if filename in self.task_manager.tasks:
                 self.selected_filename = filename
                 self.selected_file_label.setText(filename)
+                self.stop_playback()
                 self.load_preview_files(filename)
-                # Включаем кнопки
                 self.open_extracted_btn.setEnabled(True)
                 self.open_replaced_btn.setEnabled(True)
                 self.open_fragments_btn.setEnabled(True)
@@ -242,7 +281,7 @@ class ProcessTab(QWidget):
             return
         stem = Path(filename).stem
 
-        # 🔹 ИЗМЕНЕНО: Пробуем разные варианты для папки с фрагментами
+        # 🔹 Папка с фрагментами — пробуем разные варианты
         possible_fragments_folders = [
             Path(work_dir) / "03_text_fragments" / f"{stem}_replaced",
             Path(work_dir) / "03_text_fragments" / f"{stem}_extracted_replaced",
@@ -254,7 +293,7 @@ class ProcessTab(QWidget):
                 fragments_dir = folder
                 break
 
-        # Извлечённый текст
+        # 🔹 Вкладка 1: Извлечённый текст
         extracted_path = Path(work_dir) / "01_extracted_text" / f"{stem}_extracted.txt"
         if extracted_path.exists():
             with open(extracted_path, 'r', encoding='utf-8') as f:
@@ -262,7 +301,7 @@ class ProcessTab(QWidget):
         else:
             self.extracted_text.setText("(файл не найден)")
 
-        # 🔹 ИЗМЕНЕНО: Обработанный текст — пробуем оба варианта имени файла
+        # 🔹 Вкладка 2: Обработанный текст (ударения) — ИСПРАВЛЕНО: пробуем оба варианта имени
         possible_replaced_files = [
             Path(work_dir) / "02_replaced_text" / f"{stem}_replaced.txt",
             Path(work_dir) / "02_replaced_text" / f"{stem}_extracted_replaced.txt",
@@ -272,14 +311,14 @@ class ProcessTab(QWidget):
             if path.exists():
                 replaced_path = path
                 break
-
+        
         if replaced_path:
             with open(replaced_path, 'r', encoding='utf-8') as f:
                 self.replaced_text.setText(f.read())
         else:
             self.replaced_text.setText("(файл не найден)")
 
-        # Фрагменты
+        # 🔹 Вкладка 3: Фрагменты
         if fragments_dir and fragments_dir.exists():
             fragments = sorted(fragments_dir.glob("fragment_*.txt"))
             if fragments:
@@ -294,8 +333,205 @@ class ProcessTab(QWidget):
         else:
             self.fragments_list.setText("(папка с фрагментами не найдена)")
 
+        # 🎵 Загрузка аудио и SRT для плеера
+        self._load_audio_and_srt(filename, work_dir)
+
+    # 🎵 === ЛОГИКА АУДИОПЛЕЕРА ===
+    def _get_audio_duration_ffprobe(self, audio_path: str) -> float:
+        try:
+            cmd = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                   '-of', 'default=noprint_wrappers=1:nokey=1', audio_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            return float(result.stdout.strip())
+        except Exception:
+            return 0.0
+
+    def _srt_time_to_ms(self, time_str):
+        time_str = time_str.strip().replace(',', '.')
+        h, m, s = time_str.split(':')
+        s, ms = s.split('.')
+        return (int(h) * 3600 + int(m) * 60 + int(s)) * 1000 + int(ms.ljust(3, '0')[:3])
+
+    def _ms_to_time_str(self, ms):
+        total_sec = ms / 1000.0
+        h = int(total_sec // 3600)
+        m = int((total_sec % 3600) // 60)
+        s = int(total_sec % 60)
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    def _load_audio_and_srt(self, filename, work_dir):
+        stem = Path(filename).stem
+        output_format = "mp3" if self.parent.mp3_radio.isChecked() else "wav"
+        audio_path = Path(work_dir) / "04_audio" / f"{stem}.{output_format}"
+        srt_path = Path(work_dir) / "05_subtitles" / f"{stem}.srt"
+
+        if audio_path.exists():
+            self.current_audio_path = str(audio_path)
+            duration_sec = self._get_audio_duration_ffprobe(self.current_audio_path)
+            self.audio_duration_ms = int(duration_sec * 1000) if duration_sec > 0 else 0
+            
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+            try:
+                pygame.mixer.music.load(self.current_audio_path)
+                self.play_btn.setEnabled(True)
+                self.seek_slider.setEnabled(True)
+            except Exception as e:
+                self.parent.log(f"Ошибка загрузки аудио: {e}")
+                self.play_btn.setEnabled(False)
+                self.seek_slider.setEnabled(False)
+                return
+            self.stop_playback()
+        else:
+            self.current_audio_path = None
+            self.play_btn.setEnabled(False)
+            self.seek_slider.setEnabled(False)
+            self.stop_playback()
+            return
+
+        # 🔹 Загрузка детальных сегментов из SRT
+        self.srt_segments = []
+        if srt_path.exists():
+            with open(srt_path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+            
+            # Получаем текст из активной вкладки (по умолчанию — извлечённый)
+            full_text = self.extracted_text.toPlainText()
+            current_pos = 0
+            
+            for block in content.split('\n\n'):
+                lines = block.strip().split('\n')
+                if len(lines) < 3:
+                    continue
+                time_range = lines[1].split(' --> ')
+                start_ms = self._srt_time_to_ms(time_range[0])
+                end_ms = self._srt_time_to_ms(time_range[1])
+                seg_text = ' '.join(lines[2:])
+                
+                # Находим позицию текста в полном файле
+                pos = full_text.find(seg_text, current_pos)
+                if pos == -1:
+                    pos = full_text.find(seg_text)
+                if pos == -1:
+                    pos = current_pos
+                    
+                end_pos = pos + len(seg_text)
+                self.srt_segments.append({
+                    'start': start_ms, 'end': end_ms,
+                    'text_pos_start': pos, 'text_pos_end': end_pos
+                })
+                current_pos = end_pos + 1
+
+        self.seek_slider.setRange(0, max(self.audio_duration_ms, 1000))
+        self.time_label.setText(f"00:00:00 / {self._ms_to_time_str(self.audio_duration_ms)}")
+
+    def toggle_playback(self):
+        if not self.current_audio_path:
+            return
+        if self.is_playing:
+            self.pause_playback()
+        else:
+            self.start_playback()
+
+    def start_playback(self):
+        if not self.current_audio_path:
+            return
+        try:
+            pygame.mixer.music.play()
+            self.is_playing = True
+            self.play_btn.setText("⏸ Пауза")
+            self.playback_timer.start(100)
+        except Exception as e:
+            self.parent.log(f"Ошибка воспроизведения: {e}")
+            self.is_playing = False
+            self.play_btn.setText("▶ Играть")
+
+    def pause_playback(self):
+        if self.is_playing:
+            pygame.mixer.music.pause()
+            self.is_playing = False
+            self.play_btn.setText("▶ Играть")
+            self.playback_timer.stop()
+
+    def stop_playback(self):
+        try:
+            pygame.mixer.music.stop()
+            pygame.mixer.music.rewind()
+        except:
+            pass
+        self.is_playing = False
+        self.play_btn.setText("▶ Играть")
+        self.playback_timer.stop()
+        self.seek_slider.setValue(0)
+        if self.audio_duration_ms > 0:
+            self.time_label.setText(f"00:00:00 / {self._ms_to_time_str(self.audio_duration_ms)}")
+        self.extracted_text.setExtraSelections([])
+
+    def _update_playback_highlight(self):
+        if not self.is_playing or not self.current_audio_path:
+            return
+        try:
+            pos_ms = pygame.mixer.music.get_pos()
+            if pos_ms == -1:
+                self.stop_playback()
+                return
+        except:
+            return
+            
+        self.seek_slider.setValue(min(pos_ms, self.audio_duration_ms))
+        self.time_label.setText(f"{self._ms_to_time_str(pos_ms)} / {self._ms_to_time_str(self.audio_duration_ms)}")
+
+        # 🔹 Подсветка работает для активной вкладки
+        active_tab = self.preview_tabs.currentIndex()
+        if active_tab == 0:
+            text_widget = self.extracted_text
+        elif active_tab == 1:
+            text_widget = self.replaced_text
+        else:
+            return  # Для вкладки фрагментов подсветка не нужна
+        
+        active_seg = None
+        for seg in self.srt_segments:
+            if seg['start'] <= pos_ms < seg['end']:
+                active_seg = seg
+                break
+        
+        if active_seg:
+            selection = QTextEditWidget.ExtraSelection()
+            cursor = text_widget.textCursor()
+            cursor.setPosition(active_seg['text_pos_start'])
+            cursor.setPosition(active_seg['text_pos_end'], QTextCursor.KeepAnchor)
+            selection.cursor = cursor
+            selection.format.setBackground(QColor(255, 255, 150))
+            selection.format.setForeground(QColor(0, 0, 0))
+            text_widget.setExtraSelections([selection])
+            text_widget.setTextCursor(cursor)
+            text_widget.ensureCursorVisible()
+        else:
+            text_widget.setExtraSelections([])
+
+    def _on_seek_pressed(self):
+        self.playback_timer.stop()
+
+    def _on_seek_released(self):
+        if not self.current_audio_path or self.audio_duration_ms == 0:
+            return
+        target_sec = self.seek_slider.value() / 1000.0
+        try:
+            pygame.mixer.music.set_pos(target_sec)
+        except:
+            pass
+        self.time_label.setText(f"{self._ms_to_time_str(self.seek_slider.value())} / {self._ms_to_time_str(self.audio_duration_ms)}")
+        if self.is_playing:
+            self.playback_timer.start(100)
+
+    def _on_volume_changed(self, val):
+        try:
+            pygame.mixer.music.set_volume(val / 100.0)
+        except:
+            pass
+
     def open_extracted_folder(self):
-        """Открыть папку с извлечёнными текстами"""
         if hasattr(self, 'selected_filename') and self.selected_filename:
             work_dir = self.parent.work_dir_edit.text()
             if work_dir:
@@ -305,7 +541,6 @@ class ProcessTab(QWidget):
                     subprocess.Popen(['xdg-open', str(folder)])
 
     def open_replaced_folder(self):
-        """Открыть папку с обработанными текстами"""
         if hasattr(self, 'selected_filename') and self.selected_filename:
             work_dir = self.parent.work_dir_edit.text()
             if work_dir:
@@ -315,12 +550,10 @@ class ProcessTab(QWidget):
                     subprocess.Popen(['xdg-open', str(folder)])
 
     def open_fragments_folder(self):
-        """Открыть папку с фрагментами выбранного файла"""
         if hasattr(self, 'selected_filename') and self.selected_filename:
             work_dir = self.parent.work_dir_edit.text()
             if work_dir:
                 stem = Path(self.selected_filename).stem
-                # 🔹 ИЗМЕНЕНО: Пробуем разные варианты
                 possible_folders = [
                     Path(work_dir) / "03_text_fragments" / f"{stem}_replaced",
                     Path(work_dir) / "03_text_fragments" / f"{stem}_extracted_replaced",
@@ -333,27 +566,22 @@ class ProcessTab(QWidget):
                         break
 
     def select_all(self):
-        """Выбрать все задания"""
         self.task_manager.select_all()
         self.update_tasks_table()
 
     def select_unready(self):
-        """Выбрать невыполненные задания"""
         self.task_manager.select_unready()
         self.update_tasks_table()
 
     def select_errors(self):
-        """Выбрать задания с ошибками"""
         self.task_manager.select_errors()
         self.update_tasks_table()
 
     def clear_selection(self):
-        """Снять выделение"""
         self.task_manager.clear_selection()
         self.update_tasks_table()
 
     def start_queue(self):
-        """Запустить обработку очереди"""
         work_dir = self.parent.work_dir_edit.text()
         if not work_dir:
             QMessageBox.critical(self, "Ошибка", "Выберите рабочую папку!")
@@ -363,10 +591,7 @@ class ProcessTab(QWidget):
             QMessageBox.information(self, "Очередь", "Нет выбранных файлов для обработки")
             return
 
-        # Сохраняем настройки
         self.parent.save_current_settings()
-
-        # Получаем настройки
         settings_tab = self.parent.settings_tab
         config_settings = {
             "split_min_length": self.config.get("split_min_length", 150),
@@ -385,7 +610,6 @@ class ProcessTab(QWidget):
             "sound_norm_refs": self.config.get("sound_norm_refs", True),
         }
 
-        # Отмечаем выбранные файлы как queued
         for file_path in selected_files:
             filename = file_path.name
             if filename in self.task_manager.tasks:
@@ -393,7 +617,6 @@ class ProcessTab(QWidget):
                     self.task_manager.mark_queued(filename)
         self.update_tasks_table()
 
-        # Запускаем поток
         self.queue_worker = QueueWorker(work_dir, selected_files, config_settings)
         self.queue_worker.progress.connect(self.on_queue_progress)
         self.queue_worker.log.connect(self.parent.log)
@@ -401,7 +624,6 @@ class ProcessTab(QWidget):
         self.queue_worker.finished.connect(self.on_queue_finished)
         self.queue_worker.start()
 
-        # Обновляем UI
         self._set_queue_ui_enabled(True)
         self.queue_progress.setVisible(True)
         self.queue_progress.setRange(0, len(selected_files))
@@ -411,7 +633,6 @@ class ProcessTab(QWidget):
         self.parent.log("=" * 50)
 
     def _set_queue_ui_enabled(self, running: bool):
-        """Включить/выключить UI очереди"""
         self.start_queue_btn.setEnabled(not running)
         self.pause_queue_btn.setEnabled(running)
         self.stop_queue_btn.setEnabled(running)
@@ -421,13 +642,14 @@ class ProcessTab(QWidget):
         self.select_errors_btn.setEnabled(not running)
         self.clear_selection_btn.setEnabled(not running)
         self.retry_errors_btn.setEnabled(not running)
+        self.play_btn.setEnabled(not running)
+        self.seek_slider.setEnabled(not running)
         if not running:
             self.start_queue_btn.setText("▶ Запуск")
             self.pause_queue_btn.setEnabled(False)
             self.stop_queue_btn.setEnabled(False)
 
     def pause_queue(self):
-        """Поставить очередь на паузу"""
         if self.queue_worker:
             self.queue_worker.pause()
             self.pause_queue_btn.setEnabled(False)
@@ -436,7 +658,6 @@ class ProcessTab(QWidget):
             self.parent.log("⏸ Очередь поставлена на паузу")
 
     def stop_queue(self):
-        """Остановить очередь"""
         if self.queue_worker:
             self.queue_worker.stop()
             self.queue_worker.wait()
@@ -449,33 +670,20 @@ class ProcessTab(QWidget):
             self.parent.log("⏹ Очередь остановлена")
 
     def retry_errors(self):
-        """Повторить задания с ошибками"""
         self.task_manager.reset_errors()
         self.update_tasks_table()
         self.start_queue()
 
     def on_queue_progress(self, current, total, filename, stage):
-        """Обновление прогресса очереди"""
         self.queue_progress.setMaximum(total)
-
-        # 🔹 ИЗМЕНЕНО: Если stage содержит символы, парсим для точного прогресса
-        if "Генерация:" in stage and "симв." in stage:
-            # Прогресс внутри файла: показываем как есть, не меняем значение прогресс-бара
-            pass
-        else:
-            # Обычный прогресс по файлам
-            self.queue_progress.setValue(current - 1)
-
+        self.queue_progress.setValue(current - 1)
         self.queue_status_label.setText(f"Обработка: {filename} - {stage}")
         self.task_manager.mark_processing(filename)
         self.update_tasks_table()
-
-        # Обновляем просмотр, если это выбранный файл
         if hasattr(self, 'selected_filename') and self.selected_filename == filename:
             self.load_preview_files(filename)
 
     def on_file_finished(self, filename, success, error_message):
-        """Завершение обработки одного файла"""
         if success:
             self.task_manager.mark_completed(filename)
             self.parent.log(f"✅ {filename} - обработан успешно")
@@ -483,16 +691,12 @@ class ProcessTab(QWidget):
             self.task_manager.mark_error(filename, error_message)
             self.parent.log(f"❌ {filename} - ошибка: {error_message}")
         self.update_tasks_table()
-
-        # Обновляем просмотр, если это выбранный файл
         if hasattr(self, 'selected_filename') and self.selected_filename == filename:
             self.load_preview_files(filename)
-
         completed = self.task_manager.get_counts()["completed"]
         self.queue_progress.setValue(completed)
 
     def on_queue_finished(self):
-        """Завершение обработки очереди"""
         self.queue_worker = None
         self._set_queue_ui_enabled(False)
         self.queue_progress.setVisible(False)
@@ -510,7 +714,6 @@ class ProcessTab(QWidget):
         self.parent.refresh_task_list()
 
     def load_tasks(self, work_dir: str, output_format: str):
-        """Загрузить задания из папки source"""
         source_dir = Path(work_dir) / "source"
         self.task_manager.load_from_source(source_dir, Path(work_dir), output_format)
         self.update_tasks_table()
