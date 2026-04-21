@@ -4,6 +4,8 @@
 Вкладка пакетной обработки
 """
 from pathlib import Path
+import subprocess
+import pygame
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
@@ -13,8 +15,6 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QBrush, QColor, QFont, QTextCursor
 from PyQt5.QtWidgets import QTextEdit as QTextEditWidget
-import pygame
-import subprocess
 from gui.task_manager import TaskManager
 from gui.queue_worker import QueueWorker
 
@@ -107,7 +107,7 @@ class ProcessTab(QWidget):
 
         layout.addWidget(queue_group)
 
-        # === Нижняя панель: просмотр (ТРИ ВКЛАДКИ) + плеер ===
+        # === Нижняя панель: 3 вкладки + плеер ===
         preview_group = QGroupBox("Просмотр и воспроизведение")
         preview_layout = QVBoxLayout(preview_group)
 
@@ -141,23 +141,20 @@ class ProcessTab(QWidget):
 
         preview_layout.addLayout(selected_layout)
 
-        # === 🔹 ВОЗВРАТ К ТРЁМ ВКЛАДКАМ ===
+        # === Три вкладки для текста ===
         self.preview_tabs = QTabWidget()
         self.preview_tabs.setMaximumHeight(300)
 
-        # Вкладка 1: Извлечённый текст
         self.extracted_text = QTextEdit()
         self.extracted_text.setReadOnly(True)
         self.extracted_text.setFont(QFont("Consolas", 10))
         self.preview_tabs.addTab(self.extracted_text, "Извлечённый текст")
 
-        # Вкладка 2: Обработанный текст (ударения)
         self.replaced_text = QTextEdit()
         self.replaced_text.setReadOnly(True)
         self.replaced_text.setFont(QFont("Consolas", 10))
         self.preview_tabs.addTab(self.replaced_text, "Обработанный текст (ударения)")
 
-        # Вкладка 3: Фрагменты
         self.fragments_list = QTextEdit()
         self.fragments_list.setReadOnly(True)
         self.fragments_list.setFont(QFont("Consolas", 9))
@@ -395,7 +392,6 @@ class ProcessTab(QWidget):
             with open(srt_path, 'r', encoding='utf-8') as f:
                 content = f.read().strip()
             
-            # Получаем текст из активной вкладки (по умолчанию — извлечённый)
             full_text = self.extracted_text.toPlainText()
             current_pos = 0
             
@@ -408,7 +404,6 @@ class ProcessTab(QWidget):
                 end_ms = self._srt_time_to_ms(time_range[1])
                 seg_text = ' '.join(lines[2:])
                 
-                # Находим позицию текста в полном файле
                 pos = full_text.find(seg_text, current_pos)
                 if pos == -1:
                     pos = full_text.find(seg_text)
@@ -481,15 +476,14 @@ class ProcessTab(QWidget):
         self.seek_slider.setValue(min(pos_ms, self.audio_duration_ms))
         self.time_label.setText(f"{self._ms_to_time_str(pos_ms)} / {self._ms_to_time_str(self.audio_duration_ms)}")
 
-        # 🔹 Подсветка работает для активной вкладки
         active_tab = self.preview_tabs.currentIndex()
         if active_tab == 0:
             text_widget = self.extracted_text
         elif active_tab == 1:
             text_widget = self.replaced_text
         else:
-            return  # Для вкладки фрагментов подсветка не нужна
-        
+            return
+
         active_seg = None
         for seg in self.srt_segments:
             if seg['start'] <= pos_ms < seg['end']:
@@ -537,7 +531,6 @@ class ProcessTab(QWidget):
             if work_dir:
                 folder = Path(work_dir) / "01_extracted_text"
                 if folder.exists():
-                    import subprocess
                     subprocess.Popen(['xdg-open', str(folder)])
 
     def open_replaced_folder(self):
@@ -546,7 +539,6 @@ class ProcessTab(QWidget):
             if work_dir:
                 folder = Path(work_dir) / "02_replaced_text"
                 if folder.exists():
-                    import subprocess
                     subprocess.Popen(['xdg-open', str(folder)])
 
     def open_fragments_folder(self):
@@ -561,7 +553,6 @@ class ProcessTab(QWidget):
                 ]
                 for folder in possible_folders:
                     if folder.exists():
-                        import subprocess
                         subprocess.Popen(['xdg-open', str(folder)])
                         break
 
@@ -582,6 +573,7 @@ class ProcessTab(QWidget):
         self.update_tasks_table()
 
     def start_queue(self):
+        """Запустить обработку очереди"""
         work_dir = self.parent.work_dir_edit.text()
         if not work_dir:
             QMessageBox.critical(self, "Ошибка", "Выберите рабочую папку!")
@@ -592,14 +584,25 @@ class ProcessTab(QWidget):
             return
 
         self.parent.save_current_settings()
-        settings_tab = self.parent.settings_tab
+
+        # 🔹 Собираем конфигурацию напрямую из config (включая перенесённые параметры)
         config_settings = {
             "split_min_length": self.config.get("split_min_length", 150),
             "split_max_length": self.config.get("split_max_length", 250),
             "split_primary_delimiters": self.config.get("split_primary_delimiters", ".!?"),
             "split_secondary_delimiters": self.config.get("split_secondary_delimiters", ":;"),
             "split_terminator": self.config.get("split_terminator", "."),
-            **settings_tab.get_settings(),
+            
+            # Базовые
+            **self.parent.settings_tab.get_settings(),
+            
+            # Модель и голос (теперь берутся из ParamsDialog/Config)
+            "speaker": self.config.get("speaker", "Claribel Dervla"),
+            "speaker_wav": self.config.get("speaker_wav", ""),
+            "use_finetuned_model": self.config.get("use_finetuned_model", False),
+            "finetuned_model_path": self.config.get("finetuned_model_path", ""),
+            
+            # Параметры синтеза
             "temperature": self.config.get("temperature", 0.85),
             "repetition_penalty": self.config.get("repetition_penalty", 2.0),
             "length_penalty": self.config.get("length_penalty", 1.0),

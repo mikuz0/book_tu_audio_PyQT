@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Генерация аудио через XTTS с поддержкой фрагментов, пауз и субтитров
+Генерация аудио через XTTS с корректным разделением параметров для стандартной и дообученной моделей
 """
 import os
 import re
@@ -17,8 +17,9 @@ from TTS.api import TTS
 from TTS.tts.configs.xtts_config import XttsConfig
 from TTS.tts.models.xtts import Xtts
 
+
 class AudioGenerator:
-    """Генерация аудио через XTTS с поддержкой фрагментов, пауз и детальных субтитров"""
+    """Генерация аудио через XTTS с поддержкой фрагментов, пауз и субтитров"""
     
     def __init__(self, work_dir, speaker='Claribel Dervla', speed=1.0, 
                  output_format='mp3', speaker_wav=None, 
@@ -46,19 +47,22 @@ class AudioGenerator:
         self.initial_pause = initial_pause
         self.generate_subtitles = generate_subtitles
         
+        # Параметры синтеза (общие)
         self.temperature = temperature
         self.repetition_penalty = repetition_penalty
         self.length_penalty = length_penalty
         self.top_k = top_k
         self.top_p = top_p
         self.num_beams = num_beams
+        
+        # Параметры, специфичные для подготовки латентов (НЕ для inference!)
         self.gpt_cond_len = gpt_cond_len
         self.sound_norm_refs = sound_norm_refs
         
         self.use_finetuned_model = use_finetuned_model
         self.finetuned_model_path = finetuned_model_path
-        self.tts_model = None
-        self.tts = None
+        self.tts_model = None  # Для дообученной модели
+        self.tts = None        # Для стандартной модели
         
         self.progress_callback = progress_callback
         self.start_time = start_time or time.time()
@@ -96,31 +100,49 @@ class AudioGenerator:
             self.progress_callback(current, total, self._format_time(elapsed))
 
     def _load_model(self):
+        """Загрузка XTTS модели (стандартной или дообученной)"""
         try:
             if self.use_finetuned_model and self.finetuned_model_path:
+                # === ДОБУЧЕННАЯ МОДЕЛЬ ===
                 model_path = Path(self.finetuned_model_path)
                 if not model_path.exists():
                     raise FileNotFoundError(f"Папка с моделью не найдена: {model_path}")
                 
+                config_file = model_path / "config.json"
+                model_file = model_path / "model.pth"
+                vocab_file = model_path / "vocab.json"
+                speaker_file = model_path / "speakers_xtts.pth"
+                
+                for f, name in [(config_file, "config.json"), (model_file, "model.pth"), (vocab_file, "vocab.json")]:
+                    if not f.exists():
+                        raise FileNotFoundError(f"Отсутствует обязательный файл: {name}")
+                
+                print(f"  Загрузка дообученной модели из: {model_path}")
                 config = XttsConfig()
-                config.load_json(str(model_path / "config.json"))
+                config.load_json(str(config_file))
                 
                 self.tts_model = Xtts.init_from_config(config)
                 self.tts_model.load_checkpoint(
                     config,
-                    checkpoint_path=str(model_path / "model.pth"),
-                    vocab_path=str(model_path / "vocab.json"),
-                    speaker_file_path=str(model_path / "speakers_xtts.pth") if (model_path / "speakers_xtts.pth").exists() else None,
+                    checkpoint_path=str(model_file),
+                    vocab_path=str(vocab_file),
+                    speaker_file_path=str(speaker_file) if speaker_file.exists() else None,
                     use_deepspeed=False
                 )
-                self.tts_model.cuda() if torch.cuda.is_available() else self.tts_model.cpu()
+                
+                if torch.cuda.is_available():
+                    self.tts_model.cuda()
+                else:
+                    self.tts_model.cpu()
                 print("✅ Дообученная модель загружена")
                 return
             
+            # === СТАНДАРТНАЯ МОДЕЛЬ ===
             print("  Загрузка стандартной модели XTTS-v2...")
-            self.tts = TTS('tts_models/multilingual/multi-dataset/xtts_v2', gpu=False)
+            self.tts = TTS('tts_models/multilingual/multi-dataset/xtts_v2', gpu=torch.cuda.is_available())
             print("✅ Стандартная модель загружена")
             
+            # 🔹 Параметры применяются НАПРЯМУЮ на модель, а не передаются в tts()
             if hasattr(self.tts, 'synthesizer') and hasattr(self.tts.synthesizer, 'tts_model'):
                 m = self.tts.synthesizer.tts_model
                 m.temperature = self.temperature
@@ -129,7 +151,8 @@ class AudioGenerator:
                 m.top_k = self.top_k
                 m.top_p = self.top_p
                 m.num_beams = self.num_beams
-                m.gpt_cond_len = self.gpt_cond_len 
+                # 🔹 Эти параметры ТОЛЬКО на модель, НЕ в tts()
+                m.gpt_cond_len = self.gpt_cond_len
                 m.sound_norm_refs = self.sound_norm_refs
                 
         except Exception as e:
@@ -137,73 +160,105 @@ class AudioGenerator:
             raise
 
     def _get_conditioning_latents(self, speaker_wav=None, speaker=None):
-        if self.tts_model is None: return None, None
+        """Получение conditioning latents для дообученной модели"""
+        if self.tts_model is None:
+            return None, None
         try:
             if speaker_wav and os.path.exists(speaker_wav):
+                # 🔹 Здесь передаём gpt_cond_len и sound_norm_refs — это корректно!
                 return self.tts_model.get_conditioning_latents(
                     audio_path=speaker_wav,
                     gpt_cond_len=self.gpt_cond_len,
                     max_ref_length=30,
                     sound_norm_refs=self.sound_norm_refs
                 )
-            speaker_id = speaker or "Claribel Dervla"
-            if hasattr(self.tts_model, 'speaker_manager') and self.tts_model.speaker_manager:
-                emb = self.tts_model.speaker_manager.speakers[speaker_id]
-                return torch.zeros(1, 1, 1024), emb
-            return None, None
+            else:
+                speaker_id = speaker or "Claribel Dervla"
+                if hasattr(self.tts_model, 'speaker_manager') and self.tts_model.speaker_manager:
+                    emb = self.tts_model.speaker_manager.speakers.get(speaker_id)
+                    if emb is not None:
+                        return torch.zeros(1, 1, 1024), emb
+                return None, None
         except Exception as e:
-            print(f"⚠️ Не удалось получить latents: {e}")
+            print(f"⚠️ Не удалось получить conditioning latents: {e}")
             return None, None
 
     def _prepare_text_for_tts(self, text: str) -> str:
-        """🔹 Очистка текста перед подачей в XTTS: устраняет пропуски слов"""
-        if not text: return ""
-        # 1. Нормализация Unicode в NFC (объединяет разложенные символы ударений)
+        """Нормализация текста перед подачей в XTTS"""
+        if not text:
+            return ""
         text = unicodedata.normalize('NFC', text)
-        # 2. Убираем невидимые управляющие символы, кроме пробелов и переносов
         text = ''.join(ch for ch in text if unicodedata.category(ch)[0] != 'C' or ch in '\n\r\t')
-        # 3. Приводим множественные пробелы к одному, убираем пробелы вокруг пунктуации
         text = re.sub(r'\s+', ' ', text).strip()
         text = re.sub(r'\s+([.,!?;:])', r'\1', text)
         return text
 
-    def _generate_fragment_standard(self, text):
-        # 🔹 split_sentences=False отключает внутренний респлит, предотвращая потерю слов
-        return self.tts.tts(
-            text=text, language='ru', speed=self.speed,
-            temperature=self.temperature, repetition_penalty=self.repetition_penalty,
-            length_penalty=self.length_penalty, top_k=self.top_k,
-            top_p=self.top_p, num_beams=self.num_beams,
-            gpt_cond_len=self.gpt_cond_len, sound_norm_refs=self.sound_norm_refs,
-            split_sentences=False
-        )
-
-    def _generate_fragment_finetuned(self, text):
-        if self.tts_model is None: raise RuntimeError("Дообученная модель не загружена")
+    def _generate_fragment_standard(self, text: str) -> torch.Tensor:
+        """🔹 Генерация через СТАНДАРТНУЮ модель — только валидные параметры для tts()"""
+        # Параметры, которые МОЖНО передавать в tts() стандартной модели:
+        tts_params = {
+            'text': text,
+            'language': 'ru',
+            'speed': self.speed,
+            'temperature': self.temperature,
+            'repetition_penalty': self.repetition_penalty,
+            'length_penalty': self.length_penalty,
+            'top_k': self.top_k,
+            'top_p': self.top_p,
+            'num_beams': self.num_beams,
+            'split_sentences': False,  # 🔹 Отключаем внутренний сплит!
+            'file_path': None
+        }
         
-        gpt_cond_latent, speaker_embedding = self._get_conditioning_latents(self.speaker_wav, self.speaker)
+        # 🔹 Логика голоса: приоритет speaker_wav, но с фоллбэком на speaker
+        if self.speaker_wav and os.path.exists(self.speaker_wav):
+            tts_params['speaker_wav'] = self.speaker_wav
+            tts_params['speaker'] = self.speaker  # Фоллбэк для совместимости
+        elif self.speaker:
+            tts_params['speaker'] = self.speaker
+        
+        return self.tts.tts(**tts_params)
+
+    def _generate_fragment_finetuned(self, text: str) -> torch.Tensor:
+        """🔹 Генерация через ДОБУЧЕННУЮ модель — параметры передаются в inference()"""
+        if self.tts_model is None:
+            raise RuntimeError("Дообученная модель не загружена")
+        
+        # 🔹 Получаем латенты с корректными параметрами (gpt_cond_len, sound_norm_refs)
+        gpt_cond_latent, speaker_embedding = self._get_conditioning_latents(
+            speaker_wav=self.speaker_wav,
+            speaker=self.speaker
+        )
         if gpt_cond_latent is None or speaker_embedding is None:
             gpt_cond_latent = torch.zeros(1, 1, 1024)
             speaker_embedding = torch.zeros(1, 512)
-            
-        # 🔹 enable_text_splitting=False критически важен для предразбитых фрагментов!
+        
+        # 🔹 В inference() передаём ТОЛЬКО параметры декодирования
+        # ❌ НЕ передаём: gpt_cond_len, sound_norm_refs — они уже учтены в латентах!
         result = self.tts_model.inference(
-            text=text, language='ru', gpt_cond_latent=gpt_cond_latent,
-            speaker_embedding=speaker_embedding, temperature=self.temperature,
-            length_penalty=self.length_penalty, repetition_penalty=self.repetition_penalty,
-            top_k=self.top_k, top_p=self.top_p, num_beams=self.num_beams,
-            speed=self.speed, enable_text_splitting=False
+            text=text,
+            language='ru',
+            gpt_cond_latent=gpt_cond_latent,
+            speaker_embedding=speaker_embedding,
+            temperature=self.temperature,
+            length_penalty=self.length_penalty,
+            repetition_penalty=self.repetition_penalty,
+            top_k=self.top_k,
+            top_p=self.top_p,
+            num_beams=self.num_beams,
+            speed=self.speed,
+            enable_text_splitting=False  # 🔹 Отключаем внутренний сплит для предразбитых фрагментов!
         )
         return result['wav']
 
-    def _generate_fragment(self, text):
-        # Текст чистится ПЕРЕД генерацией
+    def _generate_fragment(self, text: str) -> torch.Tensor:
+        """Единая точка входа для генерации фрагмента"""
         clean_text = self._prepare_text_for_tts(text)
         if self.use_finetuned_model and self.tts_model is not None:
             return self._generate_fragment_finetuned(clean_text)
         return self._generate_fragment_standard(clean_text)
 
-    def _save_audio(self, audio_data, output_path, sample_rate=24000):
+    def _save_audio(self, audio_data, output_path, sample_rate=24000) -> Path:
         if hasattr(audio_data, 'cpu'):
             audio_data = audio_data.cpu().numpy()
         if np.max(np.abs(audio_data)) > 0:
@@ -223,15 +278,16 @@ class AudioGenerator:
                 subprocess.run(cmd, capture_output=True, check=True, timeout=30)
                 return output_path
             finally:
-                if os.path.exists(tmp_wav): os.unlink(tmp_wav)
+                if os.path.exists(tmp_wav):
+                    os.unlink(tmp_wav)
         return output_path
 
-    def _clean_text(self, text):
+    def _clean_text(self, text: str) -> str:
         text = text.replace('+', '')
         text = unicodedata.normalize('NFD', text)
         return ''.join(ch for ch in text if not unicodedata.combining(ch))
 
-    def _generate_detailed_srt_segments(self, fragment_text: str, frag_start: float, frag_end: float):
+    def _generate_detailed_srt_segments(self, fragment_text: str, frag_start: float, frag_end: float) -> list:
         parts = re.split(r'([.!?]+)', fragment_text)
         sentences = []
         for i in range(0, len(parts), 2):
@@ -263,7 +319,7 @@ class AudioGenerator:
             current_time = end_time
         return detailed
 
-    def generate_single_file(self, filename: str, progress_callback=None):
+    def generate_single_file(self, filename: str, progress_callback=None) -> tuple:
         cb = progress_callback or self.progress_callback
         stem = Path(filename).stem
         
@@ -350,5 +406,6 @@ class AudioGenerator:
 
     def get_audio_files(self):
         return list(self.audio_dir.glob(f"*.{self.output_format}"))
+    
     def get_subtitle_files(self):
         return list(self.subtitles_dir.glob("*.srt"))

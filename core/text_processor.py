@@ -57,7 +57,7 @@ class TextProcessor:
         text = re.sub(r'\s+\.', '.', text)
         text = re.sub(r'\s+,', ',', text)
         text = re.sub(r'\.{2,}', '.', text)
-        # .strip() допустим только ДО применения терминатора
+        text = re.sub(r'\.\s*([а-яё])', lambda m: '. ' + m.group(1).upper(), text, flags=re.I)
         return text.strip()
 
     def find_original_segment(self, fragment, original_text):
@@ -73,7 +73,6 @@ class TextProcessor:
             end_pos = pos + len(search_fragment)
             return original_text[pos:end_pos], pos, end_pos
         
-        # Fallback поиск по началам и концам
         start_part = search_fragment[:50] if len(search_fragment) > 50 else search_fragment
         end_part = search_fragment[-50:] if len(search_fragment) > 50 else search_fragment
         
@@ -89,7 +88,7 @@ class TextProcessor:
         return original_text[start_pos:end_pos], start_pos, end_pos
 
     def fix_fragment_end(self, text, terminator="."):
-        """🔹 Гарантированная подстановка терминатора. Вызывается СТРОГО ПОСЛЕДНИМ."""
+        """Гарантированная подстановка терминатора. Вызывается СТРОГО ПОСЛЕДНИМ."""
         if not text:
             return terminator or ""
         
@@ -103,7 +102,7 @@ class TextProcessor:
         if last_char in ';:,':
             text = text[:-1] + '.'
             
-        # Если терминатор - пробел
+        # Если терминатор - пробел (один или два)
         if terminator == " ":
             return text + " "
         if terminator == "  ":
@@ -127,7 +126,6 @@ class TextProcessor:
         if not text:
             return ""
         
-        # Убираем мусор в начале
         text = text.lstrip(' .,;:')
         if text.startswith('...'):
             text = text[3:].lstrip()
@@ -136,21 +134,21 @@ class TextProcessor:
         elif text.startswith('.'):
             text = text[1:].lstrip()
             
-        # Первая буква заглавная
         if text and text[0].islower():
             text = text[0].upper() + text[1:]
             
         return text
 
     def restore_fragment(self, fragment, original_text, terminator="."):
-        """🔹 ИСПРАВЛЕНО: строгий порядок вызовов"""
+        """Восстановление фрагмента по исходному тексту с гарантированным терминатором"""
         if not fragment:
             return ""
             
         original_segment, _, _ = self.find_original_segment(fragment, original_text)
         result = original_segment if original_segment else fragment
         
-        # 1. Нормализуем пробелы
+        # 🔹 СТРОГИЙ ПОРЯДОК ВЫЗОВОВ:
+        # 1. Сначала нормализуем пробелы внутри текста
         result = self.normalize_spaces(result)
         # 2. Правим начало (убираем мусор, делаем первую букву заглавной)
         result = self.fix_fragment_start(result)
@@ -159,49 +157,86 @@ class TextProcessor:
         
         return result
 
-    def merge_short_fragments(self, fragments, min_length):
-        """Объединение коротких фрагментов"""
-        if not fragments:
-            return []
-            
-        merged = []
+    def split_text(self, text, original_text, min_length=150, max_length=250, 
+                   primary_delimiters=".!? ", secondary_delimiters=":; ", terminator="."):
+        """
+        🔹 ОДНОПРОХОДНЫЙ АЛГОРИТМ с корректной обработкой второстепенных разделителей:
+        1. Накапливаем текст до основного разделителя (.!?)
+        2. Если длина < min_length → продолжаем накапливать
+        3. Если длина > max_length → ищем второстепенный разделитель (:;) С КОНЦА буфера
+           - Находим первый подходящий символ, при котором длина ≤ max_length
+           - Отрезаем фрагмент, остаток оставляем в буфере
+        4. Если длина в [min_length, max_length] → сохраняем, очищаем буфер
+        5. Повторяем до конца текста
+        """
+        fragments = []
         buffer = ""
-        
-        for frag in fragments:
-            if buffer:
-                buffer += " " + frag
-            else:
-                buffer = frag
-                
-            if len(buffer) >= min_length:
-                merged.append(buffer.strip())
-                buffer = ""
-                
-        # 🔹 Обработка остатка: если он короче min_length, приклеиваем к последнему
-        if buffer:
-            if merged and len(buffer) < min_length:
-                merged[-1] = merged[-1] + " " + buffer
-            else:
-                merged.append(buffer.strip())
-                
-        return merged
+        pos = 0
+        text_len = len(text)
 
-    def split_by_delimiters(self, text, delimiters):
-        """Разбиение текста по указанным символам"""
-        parts = []
-        current = ""
-        
-        for ch in text:
-            current += ch
-            if ch in delimiters:
-                if current.strip():
-                    parts.append(current.strip())
-                current = ""
-                
-        if current.strip():
-            parts.append(current.strip())
+        while pos < text_len:
+            # Находим позицию ближайшего основного разделителя
+            next_delim_idx = text_len
+            for delim in primary_delimiters:
+                idx = text.find(delim, pos)
+                if idx != -1 and idx < next_delim_idx:
+                    next_delim_idx = idx
+
+            # Захватываем текст до разделителя включительно
+            chunk_end = next_delim_idx + 1 if next_delim_idx < text_len else text_len
+            buffer += text[pos:chunk_end]
+            pos = chunk_end
+
+            buf_len = len(buffer)
             
-        return parts
+            if buf_len >= min_length:
+                fragment_to_save = None
+                
+                if buf_len <= max_length:
+                    # Идеальный случай: длина в допустимых пределах
+                    fragment_to_save = buffer.strip()
+                    buffer = ""
+                else:
+                    # Слишком длинный → ищем второстепенный разделитель С КОНЦА
+                    split_idx = -1
+                    
+                    # 🔹 ИЩЕМ С КОНЦА БУФЕРА до тех пор, пока длина не станет ≤ max_length
+                    for i in range(buf_len - 1, max_length - 1, -1):
+                        if buffer[i] in secondary_delimiters:
+                            # Проверяем, что после отсечения длина будет ≥ min_length
+                            candidate_len = i + 1
+                            if candidate_len >= min_length:
+                                split_idx = i
+                                break
+                            # Если меньше min_length — продолжаем поиск дальше к началу
+                    
+                    if split_idx != -1:
+                        # Нашли подходящий разделитель → отрезаем
+                        fragment_to_save = buffer[:split_idx+1].strip()
+                        buffer = buffer[split_idx+1:]
+                    else:
+                        # Не нашли второстепенный разделитель → ищем основной после min_length
+                        found = False
+                        for i in range(min_length, buf_len):
+                            if buffer[i] in primary_delimiters:
+                                fragment_to_save = buffer[:i+1].strip()
+                                buffer = buffer[i+1:]
+                                found = True
+                                break
+                        
+                        if not found:
+                            # Крайний случай: жестко режем на max_length
+                            fragment_to_save = buffer[:max_length].strip()
+                            buffer = buffer[max_length:]
+                
+                if fragment_to_save:
+                    fragments.append(self.restore_fragment(fragment_to_save, original_text, terminator))
+
+        # Сохраняем остаток текста (хвост)
+        if buffer.strip():
+            fragments.append(self.restore_fragment(buffer.strip(), original_text, terminator))
+
+        return fragments
 
     def process_file(self, input_file):
         """Применить словарь ударений и сохранить"""
@@ -241,38 +276,6 @@ class TextProcessor:
                 print(f"  ОШИБКА: {e}")
                 
         return results
-
-    def split_text(self, text, original_text, min_length=150, max_length=250, 
-                   primary_delimiters=".!? ", secondary_delimiters=":; ", terminator="."):
-        """🔹 ИСПРАВЛЕНО: убрано жёсткое разбиение, исправлена логика склейки"""
-        # Шаг 1: Разбиение по главным разделителям
-        parts = self.split_by_delimiters(text, primary_delimiters)
-        
-        # Шаг 2: Объединение коротких (1-й проход)
-        merged = self.merge_short_fragments(parts, min_length)
-        
-        # Шаг 3: Разбиение длинных по второстепенным разделителям
-        final_parts = []
-        for part in merged:
-            if len(part) <= max_length:
-                final_parts.append(part)
-            else:
-                sub_parts = self.split_by_delimiters(part, secondary_delimiters)
-                # 🔹 Если второстепенные разделители сработали -> используем их
-                # 🔹 ИНАЧЕ оставляем длинный фрагмент как есть (жёсткий split УБРАН)
-                final_parts.extend(sub_parts if len(sub_parts) > 1 else [part])
-                
-        # Шаг 4: Объединение коротких (2-й проход)
-        merged_again = self.merge_short_fragments(final_parts, min_length)
-        
-        # Шаг 5: Восстановление по исходному тексту и применение терминатора
-        restored_parts = []
-        for part in merged_again:
-            restored = self.restore_fragment(part, original_text, terminator)
-            if restored:  # Сохраняем только непустые результаты
-                restored_parts.append(restored)
-                
-        return restored_parts
 
     def split_file(self, input_file, original_text, min_length=150, max_length=250,
                    primary_delimiters=".!? ", secondary_delimiters=":; ", terminator="."):
