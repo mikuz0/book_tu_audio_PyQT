@@ -4,3 +4,4 @@ from core.text_extractor import TextExtractor
 from core.stress_dict import StressDictionary
 from core.text_processor import TextProcessor
 from core.audio_generator import AudioGenerator
+from core.text_splitter import TextSplitter  # ← добавлен импорт

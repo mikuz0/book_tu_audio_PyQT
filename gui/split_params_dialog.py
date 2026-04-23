@@ -4,19 +4,21 @@
 Диалоговое окно для настройки параметров разбиения текста
 """
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSlider,
-    QPushButton, QGroupBox, QSpinBox, QLineEdit, QFormLayout
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QGroupBox, QSpinBox, QFormLayout
 )
 from PyQt5.QtCore import Qt
 
+
 class SplitParamsDialog(QDialog):
     """Диалоговое окно для настройки параметров разбиения текста"""
+    
     def __init__(self, parent, config):
         super().__init__(parent)
         self.config = config
         self.setWindowTitle("Параметры разбиения текста")
-        self.setMinimumSize(500, 550)
-        self.resize(550, 600)
+        self.setMinimumSize(400, 300)
+        self.resize(450, 350)
         self.setModal(True)
         self.setup_ui()
         self.load_values()
@@ -26,78 +28,46 @@ class SplitParamsDialog(QDialog):
 
         # Пояснение
         info_label = QLabel(
-            "Настройка разбиения текста на фрагменты.\n"
-            "Фрагменты оптимальной длины помогают избежать артефактов (хвостов).\n"
-            "Алгоритм работы:\n"
-            "1. Базовое разбиение по главным разделителям\n"
-            "2. Объединение коротких фрагментов до минимальной длины\n"
-            "3. Разбиение длинных фрагментов по второстепенным разделителям\n"
-            "4. Объединение коротких фрагментов (второй проход)\n"
-            "5. Восстановление знаков препинания по исходному тексту\n"
-            "6. Добавление символа завершения в конец фрагмента\n"
-            "7. Нормализация пробелов"
+            "Используется RecursiveCharacterTextSplitter из LangChain.\n"
+            "Алгоритм рекурсивно пытается разделить текст по разделителям\n"
+            "в порядке приоритета: абзацы → строки → предложения → запятые → пробелы."
         )
         info_label.setWordWrap(True)
         info_label.setStyleSheet("color: gray;")
         layout.addWidget(info_label)
 
-        # Группа параметров длины
-        length_group = QGroupBox("Параметры длины")
-        length_layout = QFormLayout(length_group)
+        # Группа параметров
+        group = QGroupBox("Параметры разбиения")
+        form_layout = QFormLayout(group)
 
-        # Минимальная длина
-        self.min_length_spin = QSpinBox()
-        # 🔹 ИЗМЕНЕНО: Расширен диапазон (было 50-200)
-        self.min_length_spin.setRange(10, 2000)
-        self.min_length_spin.setSingleStep(10)
-        self.min_length_spin.setToolTip("Фрагменты короче этого значения будут объединены с соседними")
-        length_layout.addRow("Минимальная длина фрагмента:", self.min_length_spin)
+        # Максимальный размер фрагмента
+        self.chunk_size_spin = QSpinBox()
+        self.chunk_size_spin.setRange(50, 2000)
+        self.chunk_size_spin.setSingleStep(10)
+        self.chunk_size_spin.setToolTip("Максимальный размер фрагмента в символах")
+        form_layout.addRow("Максимальный размер фрагмента:", self.chunk_size_spin)
 
-        # Максимальная длина
-        self.max_length_spin = QSpinBox()
-        # 🔹 ИЗМЕНЕНО: Расширен диапазон (было 150-500, теперь можно ставить < 180)
-        self.max_length_spin.setRange(10, 5000)
-        self.max_length_spin.setSingleStep(10)
-        self.max_length_spin.setToolTip("Фрагменты длиннее этого значения будут разбиты по второстепенным разделителям")
-        length_layout.addRow("Максимальная длина фрагмента:", self.max_length_spin)
+        # Перекрытие между фрагментами
+        self.chunk_overlap_spin = QSpinBox()
+        self.chunk_overlap_spin.setRange(0, 500)
+        self.chunk_overlap_spin.setSingleStep(10)
+        self.chunk_overlap_spin.setToolTip("Перекрытие между соседними фрагментами (для сохранения контекста)")
+        form_layout.addRow("Перекрытие (символов):", self.chunk_overlap_spin)
 
-        layout.addWidget(length_group)
-
-        # Группа разделителей
-        delimiter_group = QGroupBox("Разделители")
-        delimiter_layout = QFormLayout(delimiter_group)
-
-        # Главные разделители
-        self.primary_edit = QLineEdit()
-        self.primary_edit.setPlaceholderText("Пример: .!?")
-        self.primary_edit.setToolTip("Символы, по которым происходит базовое разбиение")
-        delimiter_layout.addRow("Главные разделители:", self.primary_edit)
-
-        # Второстепенные разделители
-        self.secondary_edit = QLineEdit()
-        self.secondary_edit.setPlaceholderText("Пример: :;")
-        self.secondary_edit.setToolTip("Символы для разбиения длинных фрагментов")
-        delimiter_layout.addRow("Второстепенные разделители:", self.secondary_edit)
-
-        # Символ завершения
-        self.terminator_edit = QLineEdit()
-        self.terminator_edit.setPlaceholderText(". ! ? ... или пробел")
-        self.terminator_edit.setToolTip("Символ, добавляемый в конец фрагмента")
-        delimiter_layout.addRow("Символ завершения:", self.terminator_edit)
-
-        layout.addWidget(delimiter_group)
+        layout.addWidget(group)
 
         # Примечание
         note_label = QLabel(
             "Примечание:\n"
-            "• В конце фрагмента запятая (,) заменяется на точку (.)\n"
-            "• В начале фрагмента удаляются недопустимые знаки (.,;:...)\n"
-            "• Первая буква фрагмента делается заглавной\n"
-            "• Кавычки и скобки сохраняются из исходного текста"
+            "• Разделители сохраняются в конце фрагментов.\n"
+            "• Алгоритм автоматически выбирает оптимальное место разбиения.\n"
+            "• Перекрытие помогает сохранить контекст между фрагментами."
         )
         note_label.setWordWrap(True)
         note_label.setStyleSheet("color: gray; font-size: 9pt;")
         layout.addWidget(note_label)
+
+        layout.addStretch()
 
         # Кнопки
         btn_layout = QHBoxLayout()
@@ -114,25 +84,16 @@ class SplitParamsDialog(QDialog):
 
     def load_values(self):
         """Загрузить текущие значения из конфига"""
-        self.min_length_spin.setValue(self.config.get("split_min_length", 150))
-        self.max_length_spin.setValue(self.config.get("split_max_length", 250))
-        self.primary_edit.setText(self.config.get("split_primary_delimiters", ".!?"))
-        self.secondary_edit.setText(self.config.get("split_secondary_delimiters", ":;"))
-        self.terminator_edit.setText(self.config.get("split_terminator", "."))
+        self.chunk_size_spin.setValue(self.config.get("split_max_length", 250))
+        self.chunk_overlap_spin.setValue(self.config.get("split_overlap", 0))
 
     def on_ok(self):
         """Сохранение параметров и закрытие"""
-        self.config.set("split_min_length", self.min_length_spin.value())
-        self.config.set("split_max_length", self.max_length_spin.value())
-        self.config.set("split_primary_delimiters", self.primary_edit.text())
-        self.config.set("split_secondary_delimiters", self.secondary_edit.text())
-        self.config.set("split_terminator", self.terminator_edit.text())
+        self.config.set("split_max_length", self.chunk_size_spin.value())
+        self.config.set("split_overlap", self.chunk_overlap_spin.value())
         self.accept()
 
     def on_reset(self):
         """Сброс значений по умолчанию"""
-        self.min_length_spin.setValue(150)
-        self.max_length_spin.setValue(250)
-        self.primary_edit.setText(".!?")
-        self.secondary_edit.setText(":;")
-        self.terminator_edit.setText(".")
+        self.chunk_size_spin.setValue(250)
+        self.chunk_overlap_spin.setValue(0)

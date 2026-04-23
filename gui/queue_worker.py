@@ -10,11 +10,12 @@ from core.text_extractor import TextExtractor
 from core.text_processor import TextProcessor
 from core.audio_generator import AudioGenerator
 
+
 class QueueWorker(QThread):
     """Поток для последовательной обработки очереди файлов"""
-    progress = pyqtSignal(int, int, str, str)  # current, total, filename, stage
+    progress = pyqtSignal(int, int, str, str)
     log = pyqtSignal(str)
-    file_finished = pyqtSignal(str, bool, str)  # filename, success, error_message
+    file_finished = pyqtSignal(str, bool, str)
     finished = pyqtSignal()
 
     def __init__(self, work_dir: str, files_to_process: list, config_settings: dict):
@@ -27,43 +28,32 @@ class QueueWorker(QThread):
 
     def _process_single_file(self, file_path: Path, idx: int, total: int, filename: str) -> bool:
         """Обработать один файл"""
-        stem = Path(filename).stem
-
         # Этап 1: Извлечение текста
         self.progress.emit(idx, total, filename, "1/4 Извлечение текста...")
         extractor = TextExtractor(self.work_dir)
         source_dir = Path(self.work_dir) / "source"
         if not source_dir.exists():
             source_dir.mkdir(parents=True, exist_ok=True)
-        # Копируем файл в source если его там нет
+        
         source_file = source_dir / filename
         if not source_file.exists():
             shutil.copy2(file_path, source_file)
         extracted_file = extractor.extract(source_file)
 
-        # Этап 2: Обработка текста (словарь ударений)
+        # Этап 2: Обработка текста (ударения)
         self.progress.emit(idx, total, filename, "2/4 Обработка текста (ударения)...")
         processor = TextProcessor(self.work_dir)
         processed_file = processor.process_file(extracted_file)
 
         # Этап 3: Разбиение на фрагменты
         self.progress.emit(idx, total, filename, "3/4 Разбиение на фрагменты...")
-        with open(extracted_file, 'r', encoding='utf-8') as f:
-            original_text = f.read()
-        processor.split_file(
-            processed_file,
-            original_text,
-            min_length=self.config_settings.get("split_min_length", 150),
-            max_length=self.config_settings.get("split_max_length", 250),
-            primary_delimiters=self.config_settings.get("split_primary_delimiters", ".!?"),
-            secondary_delimiters=self.config_settings.get("split_secondary_delimiters", ":;"),
-            terminator=self.config_settings.get("split_terminator", ".")
-        )
+        chunk_size = self.config_settings.get("split_max_length", 250)
+        chunk_overlap = self.config_settings.get("split_overlap", 0)
+        processor.split_file(processed_file, chunk_size, chunk_overlap)
 
-        # Этап 4: Генерация аудио ТОЛЬКО ДЛЯ ЭТОГО ФАЙЛА
+        # Этап 4: Генерация аудио
         self.progress.emit(idx, total, filename, "4/4 Генерация аудио...")
         
-        # 🔹 ИЗМЕНЕНО: Коллбэк для прогресса внутри файла
         def on_fragment_progress(fname, pct, chars_done, chars_total):
             stage = f"Генерация: {pct}% ({chars_done}/{chars_total} симв.)"
             self.progress.emit(idx, total, filename, stage)
@@ -87,10 +77,9 @@ class QueueWorker(QThread):
             sound_norm_refs=self.config_settings.get("sound_norm_refs", True),
             use_finetuned_model=self.config_settings.get("use_finetuned_model", False),
             finetuned_model_path=self.config_settings.get("finetuned_model_path", ""),
-            progress_callback=on_fragment_progress  # 🔹 ИЗМЕНЕНО: передаём коллбэк
+            progress_callback=on_fragment_progress
         )
         
-        # 🔹 ИЗМЕНЕНО: Вызываем generate_single_file с коллбэком
         audio_file, subtitle_file = generator.generate_single_file(filename, progress_callback=on_fragment_progress)
         
         if audio_file is None:

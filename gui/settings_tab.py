@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 
+
 class SettingsTab(QWidget):
     """Вкладка настроек приложения"""
     def __init__(self, parent, config):
@@ -97,7 +98,7 @@ class SettingsTab(QWidget):
         synth_btn = QPushButton("⚙ Параметры синтеза, модели и голоса")
         synth_btn.clicked.connect(self.parent.open_synth_params)
         params_layout.addWidget(synth_btn)
-        split_btn = QPushButton("✂ Параметры разбиения")
+        split_btn = QPushButton("✂ Параметры разбиения (размер фрагмента)")
         split_btn.clicked.connect(self.parent.open_split_params)
         params_layout.addWidget(split_btn)
         params_layout.addStretch()

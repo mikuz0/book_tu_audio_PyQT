@@ -9,3 +9,5 @@ numpy
 PyQt5>=5.15.0
 transformers==4.38.0
 pygame
+langchain-text-splitters
+
