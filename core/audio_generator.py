@@ -11,11 +11,9 @@ import unicodedata
 from pathlib import Path
 import time
 import numpy as np
-import torch
 from scipy.io.wavfile import write as write_wav
-from TTS.api import TTS
-from TTS.tts.configs.xtts_config import XttsConfig
-from TTS.tts.models.xtts import Xtts
+
+# ⚡ Тяжёлые импорты будут выполняться только при реальном использовании
 
 
 class AudioGenerator:
@@ -101,6 +99,12 @@ class AudioGenerator:
 
     def _load_model(self):
         """Загрузка XTTS модели (стандартной или дообученной)"""
+        # ⚡ Локальный импорт тяжёлых модулей
+        import torch
+        from TTS.api import TTS
+        from TTS.tts.configs.xtts_config import XttsConfig
+        from TTS.tts.models.xtts import Xtts
+        
         try:
             if self.use_finetuned_model and self.finetuned_model_path:
                 # === ДОБУЧЕННАЯ МОДЕЛЬ ===
@@ -161,6 +165,9 @@ class AudioGenerator:
 
     def _get_conditioning_latents(self, speaker_wav=None, speaker=None):
         """Получение conditioning latents для дообученной модели"""
+        # ⚡ Локальный импорт torch
+        import torch
+        
         if self.tts_model is None:
             return None, None
         try:
@@ -193,8 +200,11 @@ class AudioGenerator:
         text = re.sub(r'\s+([.,!?;:])', r'\1', text)
         return text
 
-    def _generate_fragment_standard(self, text: str) -> torch.Tensor:
+    def _generate_fragment_standard(self, text: str):
         """🔹 Генерация через СТАНДАРТНУЮ модель — только валидные параметры для tts()"""
+        # ⚡ Локальный импорт torch
+        import torch
+        
         # Параметры, которые МОЖНО передавать в tts() стандартной модели:
         tts_params = {
             'text': text,
@@ -219,8 +229,11 @@ class AudioGenerator:
         
         return self.tts.tts(**tts_params)
 
-    def _generate_fragment_finetuned(self, text: str) -> torch.Tensor:
+    def _generate_fragment_finetuned(self, text: str):
         """🔹 Генерация через ДОБУЧЕННУЮ модель — параметры передаются в inference()"""
+        # ⚡ Локальный импорт torch
+        import torch
+        
         if self.tts_model is None:
             raise RuntimeError("Дообученная модель не загружена")
         
@@ -251,14 +264,18 @@ class AudioGenerator:
         )
         return result['wav']
 
-    def _generate_fragment(self, text: str) -> torch.Tensor:
+    def _generate_fragment(self, text: str):
         """Единая точка входа для генерации фрагмента"""
         clean_text = self._prepare_text_for_tts(text)
         if self.use_finetuned_model and self.tts_model is not None:
             return self._generate_fragment_finetuned(clean_text)
         return self._generate_fragment_standard(clean_text)
 
-    def _save_audio(self, audio_data, output_path, sample_rate=24000) -> Path:
+    def _save_audio(self, audio_data, output_path, sample_rate=24000):
+        """Сохранение аудио в файл"""
+        # ⚡ Локальный импорт torch
+        import torch
+        
         if hasattr(audio_data, 'cpu'):
             audio_data = audio_data.cpu().numpy()
         if np.max(np.abs(audio_data)) > 0:
@@ -319,7 +336,11 @@ class AudioGenerator:
             current_time = end_time
         return detailed
 
-    def generate_single_file(self, filename: str, progress_callback=None) -> tuple:
+    def generate_single_file(self, filename: str, progress_callback=None):
+        """Генерация аудио для одного файла"""
+        # ⚡ Локальный импорт torch
+        import torch
+        
         cb = progress_callback or self.progress_callback
         stem = Path(filename).stem
         
@@ -361,7 +382,8 @@ class AudioGenerator:
             if cb and total_chars > 0:
                 cb(filename, int(chars_processed/total_chars*100), chars_processed, total_chars)
                 
-            if isinstance(audio, np.ndarray): audio = torch.from_numpy(audio)
+            if isinstance(audio, np.ndarray): 
+                audio = torch.from_numpy(audio)
             elif isinstance(audio, list) and len(audio) > 0:
                 audio = audio[0] if isinstance(audio[0], torch.Tensor) else torch.from_numpy(np.array(audio))
                 
@@ -375,7 +397,8 @@ class AudioGenerator:
                 audio_parts.append(torch.zeros(pause_samples))
                 current_time += self.fragment_pause
                 
-        if not audio_parts: return None, None
+        if not audio_parts: 
+            return None, None
         
         final_audio = torch.cat(audio_parts)
         ext = '.mp3' if self.output_format == 'mp3' else '.wav'
@@ -394,14 +417,18 @@ class AudioGenerator:
         return out_file, sub_file
 
     def generate_all(self):
-        if not self.fragments_dir.exists(): return [], []
+        if not self.fragments_dir.exists(): 
+            return [], []
         results, subs = [], []
-        for idx, d in enumerate([p for p in self.fragments_dir.iterdir() if p.is_dir()], 1):
+        folders = [p for p in self.fragments_dir.iterdir() if p.is_dir()]
+        for idx, d in enumerate(folders, 1):
             name = d.name.replace('_replaced', '').replace('_extracted', '')
             a, s = self.generate_single_file(name)
-            if a: results.append(a)
-            if s: subs.append(s)
-            self._update_progress(idx, len([p for p in self.fragments_dir.iterdir() if p.is_dir()]))
+            if a: 
+                results.append(a)
+            if s: 
+                subs.append(s)
+            self._update_progress(idx, len(folders))
         return results, subs
 
     def get_audio_files(self):

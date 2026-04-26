@@ -28,6 +28,7 @@ class AccentEditorWindow(QMainWindow):
         self.data: Dict[str, str] = {}
         self.modified = False
         self.settings = QSettings('AccentEditor', 'Editor')
+        self.last_path = str(Path.home())  # ← Инициализируем last_path
         
         self.init_ui()
         
@@ -153,13 +154,12 @@ class AccentEditorWindow(QMainWindow):
         last_path = self.settings.value('last_path', '')
         if last_path:
             self.last_path = last_path
-        else:
-            self.last_path = str(Path.home())
+        # else: self.last_path уже установлен в __init__ как str(Path.home())
     
     def save_last_path(self):
         if self.current_file:
             self.settings.setValue('last_path', str(self.current_file.parent))
-        elif hasattr(self, 'last_path'):
+        else:
             self.settings.setValue('last_path', self.last_path)
     
     def update_status_bar(self):
