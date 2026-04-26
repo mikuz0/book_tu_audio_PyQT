@@ -26,8 +26,67 @@ class QueueWorker(QThread):
         self._is_running = True
         self._is_paused = False
 
+    def _log_settings(self, filename: str):
+        """Вывести настройки синтеза в лог"""
+        settings = self.config_settings
+        
+        self.log.emit(f"\n{'='*80}")
+        self.log.emit(f"📁 ФАЙЛ: {filename}")
+        self.log.emit(f"{'='*80}")
+        
+        # Модель и голос
+        use_finetuned = settings.get("use_finetuned_model", False)
+        if use_finetuned:
+            self.log.emit(f"🎙 МОДЕЛЬ: ДООБУЧЕННАЯ")
+            self.log.emit(f"   Путь: {settings.get('finetuned_model_path', '-')}")
+        else:
+            self.log.emit(f"🎙 МОДЕЛЬ: СТАНДАРТНАЯ (XTTS-v2)")
+        
+        speaker = settings.get("speaker", "Claribel Dervla")
+        speaker_wav = settings.get("speaker_wav", "")
+        if speaker_wav:
+            self.log.emit(f"   Голос: КЛОНИРОВАНИЕ из файла: {speaker_wav}")
+        else:
+            self.log.emit(f"   Голос: {speaker}")
+        
+        self.log.emit("")
+        self.log.emit("⚙ ПАРАМЕТРЫ СИНТЕЗА:")
+        self.log.emit(f"   Скорость речи: {settings.get('speed', 1.0):.1f}x")
+        self.log.emit(f"   Температура: {settings.get('temperature', 0.85)}")
+        self.log.emit(f"   Штраф за повторы: {settings.get('repetition_penalty', 2.0)}")
+        self.log.emit(f"   Штраф за длину: {settings.get('length_penalty', 1.0)}")
+        self.log.emit(f"   Top K: {settings.get('top_k', 50)}")
+        self.log.emit(f"   Top P: {settings.get('top_p', 0.85)}")
+        self.log.emit(f"   Num Beams: {settings.get('num_beams', 1)}")
+        
+        if use_finetuned:
+            self.log.emit("")
+            self.log.emit("🔧 ПАРАМЕТРЫ ДООБУЧЕННОЙ МОДЕЛИ:")
+            self.log.emit(f"   Длина контекста (gpt_cond_len): {settings.get('gpt_cond_len', 12)} сек")
+            self.log.emit(f"   Нормализация образца: {settings.get('sound_norm_refs', True)}")
+        
+        self.log.emit("")
+        self.log.emit("📝 ПАРАМЕТРЫ АУДИО:")
+        self.log.emit(f"   Формат: {settings.get('output_format', 'mp3').upper()}")
+        self.log.emit(f"   Пауза между фрагментами: {settings.get('fragment_pause', 0.2)} сек")
+        self.log.emit(f"   Пауза в начале: {settings.get('initial_pause', 0.0)} сек")
+        self.log.emit(f"   Субтитры: включены")
+        
+        self.log.emit("")
+        self.log.emit("📄 ПАРАМЕТРЫ РАЗБИЕНИЯ ТЕКСТА:")
+        self.log.emit(f"   Алгоритм: RecursiveCharacterTextSplitter")
+        self.log.emit(f"   Максимальный размер фрагмента: {settings.get('split_max_length', 250)} символов")
+        self.log.emit(f"   Перекрытие: {settings.get('split_overlap', 0)} символов")
+        self.log.emit(f"   Приоритет разделителей: абзацы → строки → предложения → запятые → пробелы")
+        
+        self.log.emit(f"{'='*80}\n")
+
     def _process_single_file(self, file_path: Path, idx: int, total: int, filename: str) -> bool:
         """Обработать один файл"""
+        
+        # 🔹 Логируем настройки перед началом
+        self._log_settings(filename)
+        
         # Этап 1: Извлечение текста
         self.progress.emit(idx, total, filename, "1/4 Извлечение текста...")
         extractor = TextExtractor(self.work_dir)
@@ -103,7 +162,7 @@ class QueueWorker(QThread):
             except Exception as e:
                 error_msg = str(e)
                 self.file_finished.emit(filename, False, error_msg)
-                self.log.emit(f"Ошибка при обработке {filename}: {error_msg}")
+                self.log.emit(f"❌ Ошибка при обработке {filename}: {error_msg}")
         self.finished.emit()
 
     def pause(self):
